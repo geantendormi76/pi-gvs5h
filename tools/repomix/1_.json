@@ -4,7 +4,7 @@
         "maxFileSize": 2000000
     },
     "output": {
-        "filePath": "tmp/repomix/project-handoff.xml",
+        "filePath": "tmp/project-handoff.xml",
         "filePathStyle": "target-relative",
         "style": "xml",
         "compress": false,
