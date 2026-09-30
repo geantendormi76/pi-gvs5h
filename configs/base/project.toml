@@ -1,0 +1,12 @@
+[project]
+name = "pi-gvs5h"
+profile = "research"
+
+[paths]
+data = "data"
+models = "models"
+artifacts = "artifacts"
+
+[runtime]
+backend = "default"
+execution = "local"

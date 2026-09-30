@@ -1,0 +1,14 @@
+[workspace]
+members = [
+    "crates/*",
+    "apps/*/src-tauri",
+]
+resolver = "3"
+default-members = [
+    "crates/*",
+]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+publish = false
