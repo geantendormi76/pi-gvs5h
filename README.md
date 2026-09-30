@@ -1,118 +1,95 @@
 # pi-gvs5h
 
-基于 **arXiv:2608.26480**（GVS5H）理论与 **Pi Agent**（`@earendil-works/pi-coding-agent`）生态构建的工业级确定性自主编程编排框架（Zero-Shot Ledger-Based Self-Orchestration Harness）。
+基于 **arXiv:2608.26480**（GVS5H）理论与 **Pi Agent**（`@earendil-works/pi-coding-agent`）生态构建的确定性自主编程编排扩展（Ledger-Based Self-Orchestration Extension）。
 
-本项目将学术界在单文件算法竞赛题上的“基于账本的自编排”架构，全面升级为能够驱动本地中端推理模型（27B–35B 参数级，含长思维链）在多文件真实复杂代码库中自主排查、修改与验证缺陷的通用 Harness。
-
----
-
-## 核心架构与设计哲学
-
-系统通过四大物理级工程闭环，彻底根除传统单会话 Agent 的注意力漂移、长上下文衰减与死循环重试缺陷：
-
-1. **物理级上下文湮灭（Fresh In-Memory Context Isolation）**：
-   每个工作流阶段（Plan ➜ Ideate ➜ Manage ➜ Work ➜ Review）均通过 `SessionManager.inMemory()` 动态拉起全新的内存 Agent 会话，在 `finally` 块中严格执行 `session.dispose()`，从物理层抹除历史 KV 缓存，杜绝注意力退化。
-2. **黑板账本中枢（Durable Blackboard Ledger）**：
-   通过 `.pi/gvs/run.json` 实现原子持久化（`.tmp` + `fs.rename`）与跨会话状态沉淀，通过 PID 探测防范锁并发与崩溃死锁。
-3. **三大硬化防线（The 3 Hardened Pillars）**：
-   - **全角色截断兜底（Universal Cut-off Summarizers）**：修复原作者非编辑角色超时直接抛错的死循环缺陷，在步数/Token 达到上限时通过小成本轻量调用抢救出结构化任务与见解。
-   - **渐进式预警刹车（Progressive Steer Warnings）**：75% 预算阈值时注入系统指令，命令模型停笔收网并交付 `gvs_report`。
-   - **角色契约与测试兼容**：Plan/Ideate 负责定位并产出可执行任务，Work 角色严格执行代码修改，严禁纯只读打转。
-4. **确定性门禁与独立盲审（Zero-Trust Gate）**：
-   Worker 自身无权声明任务完成；代码修改后必须通过配置的物理测试（`checks`）；通过后交由独立、只读的 Review 角色审阅 diff，审阅通过方可宣告完成。
+通过内存级会话隔离（Fresh Context Isolation）、黑板账本原子持久化（Durable Blackboard Ledger）与全角色截断保底（Universal Cut-off Summarizers），使本地中端推理模型（27B–35B）在面对真实仓库缺陷时，能够自主完成“规划 ➜ 探查 ➜ 调度 ➜ 改码 ➜ 验证 ➜ 盲审”的闭环，杜绝上下文退化与死循环。
 
 ---
 
-## 仓库结构 (Monorepo Topology)
+## 真实仓库结构
 
-本项目严格遵循 AI 母仓库规范（三语言职责物理隔离）：
+本项目采用多包工作区（Workspace）管理，所有核心逻辑与验证工具严格归位：
 
 ```text
 C:\dev\pi-gvs5h\
-├── node/                     # Node.js / TypeScript 工程域 (Agent Harness & Extension)
+├── node/
 │   └── packages/
-│       └── core/             # @pi-gvs5h/core 核心实现与 Pi 扩展入口
-│           ├── extensions/   # extensions/index.ts (注册 /gvs 指令)
-│           ├── src/          # workflow.ts, pi-worker.ts, ledger.ts, config.ts
-│           └── tests/        # 20 项端到端及单元测试 (RPC, SDK 隔离, 状态机, 迁移)
+│       └── core/                 # @pi-gvs5h/core：核心引擎与 Pi 扩展
+│           ├── extensions/       # index.ts（注册 /gvs 指令，拦截宿主事件）
+│           ├── src/              # workflow.ts, pi-worker.ts, ledger.ts, config.ts, verification.ts
+│           ├── tests/            # 20 项端到端及单元测试（RPC 握手、会话隔离、截断挽救、锁迁移）
+│           └── package.json      # 声明 "pi": { "extensions": [...] } 与依赖
 ├── tools/
-│   ├── validation/           # 真实仓库打靶套件与判分器 (SWE-bench 风格靶场)
-│   │   ├── instances/        # 评测实例 (qwen-next, ox-alpha, lodestar)
-│   │   ├── lib/              # 零依赖 Node VM 浏览器沙箱驱动
-│   │   ├── selftest.mjs      # 0 成本沙箱判分器自测套件
-│   │   ├── runner-selftest.mjs # 0 成本本地伪模型运行器调度自测
-│   │   └── run.mjs           # 评测运行器 (支持 plain arm 与 gvs arm 对照)
-│   └── repomix/              # 跨会话工程交接打包配置
-├── apps/                     # Desktop / UI 边界 (Tauri + React，与 Harness 物理隔离)
-├── crates/                   # Rust 工作区 (底层系统能力储备)
-├── python/                   # Python / uv 工作区 (科学计算与模型评估储备)
-├── configs/                  # 声明式配置注入层
-├── docs/                     # 架构文档与学术理论依据
-├── HANDOFF.md                # 权威跨会话交接档案 (Single Source of Truth)
-├── pnpm-workspace.yaml       # 工作区配置 (严格管理 allowBuilds 原生构建策略)
-└── package.json
+│   ├── validation/               # 真实仓库打靶套件（SWE-bench 风格基准测试）
+│   │   ├── instances/            # 评测实例（qwen-next, ox-alpha, lodestar）
+│   │   ├── lib/                  # 零依赖 Node VM 浏览器沙箱驱动
+│   │   ├── selftest.mjs          # 0 成本沙箱判定器自测（验证 guards 与 reference-fix）
+│   │   ├── runner-selftest.mjs   # 0 成本本地伪模型运行器全流程自测
+│   │   └── run.mjs               # 评测运行器（支持 plain 与 gvs 双臂对照）
+│   └── repomix/                  # 跨会话工程交接打包配置
+├── docs/                         # 理论依据与学术文档
+├── HANDOFF.md                    # 跨会话唯一权威交接档案
+├── pnpm-workspace.yaml           # 工作区配置（管理 allowBuilds 原生构建白名单）
+└── package.json                  # 工作区根配置
 ```
 
 ---
 
-## 安装与快速开始
+## 快速安装与使用
 
-### 1. 环境要求
-- Node.js >= 22.18.0
-- pnpm >= 11.13.0
-- Pi Agent (`@earendil-works/pi-coding-agent`)
-
-### 2. 本地链接至 Pi
-将核心包全局链接到你的 Pi 环境：
+### 1. 安装依赖
 
 ```powershell
-# 1. 安装依赖
+# 在仓库根目录安装工作区全部依赖
 pnpm install
+```
 
-# 2. 挂载扩展到 Pi
+### 2. 挂载扩展至 Pi
+
+将本扩展的核心包挂载进全局 Pi Agent 宿主：
+
+```powershell
 cd node/packages/core
 pi install -l .
 ```
 
-*核验挂载状态*：检查 `~/.pi/agent/settings.json` 的 `"packages"` 中已包含当前绝对路径 `"C:\\dev\\pi-gvs5h\\node\\packages\\core"`。
+*核验方式*：检查 `~/.pi/agent/settings.json` 的 `"packages"` 列表中已包含：
+`"C:\\dev\\pi-gvs5h\\node\\packages\\core"`
 
-### 3. 在项目中使用
-在需要进行自主编码的任何目标项目目录下：
+### 3. 在目标项目中运行
+
+在任何需要自主修复缺陷的代码库根目录下：
 
 ```text
-# 1. 初始化配置 (生成 .pi/gvs.json)
+# 初始化配置（生成 .pi/gvs.json）
 /gvs init
 
-# 2. 启动自主编码工作流
-/gvs 修复登录表单在密码重置时的校验失效缺陷
+# 启动自主编码工作流
+/gvs <你的修复目标>
 ```
 
-#### 常用指令
-
-| 指令 | 作用 |
-| :--- | :--- |
-| `/gvs <goal>` | 以当前选定的模型与思考预算启动自编排工作流 |
-| `/gvs status` | 查看当前账本状态、步骤进度、Token 消耗与交接报告 |
-| `/gvs plan` | 查看已拆解的任务清单与执行状态 |
-| `/gvs resume` | 在中断或调整配置后，从账本最新快照断点续跑 |
-| `/gvs cancel` | 安全终止当前工作流（保留代码修改与账本） |
-| `/gvs reset` | 归档当前账本，准备执行新的目标 |
+常用控制指令：
+- `/gvs status`：查看当前账本进度、步数、Token 消耗与交接摘要
+- `/gvs plan`：查看已拆解的任务清单与状态
+- `/gvs resume`：在中断或调整预算后，从账本最新快照断点续跑
+- `/gvs cancel`：安全终止当前工作流（保留代码修改与账本）
+- `/gvs reset`：归档当前账本，允许启动新目标
 
 ---
 
 ## 验证与测试体系
 
-系统内置严格的三层测试金字塔，确保修改零回归：
+项目配备了严格的分层测试体系，验证修改时请优先使用低成本测试：
 
-### 第 1 层：核心单元测试与契约回归 (耗时 ~1.6s)
-覆盖 RPC 发现、真机文件修改、会话隔离、截断挽救、防死循环熔断等全部 20 组测试：
+### 1. 核心单元测试（20/20 PASS，耗时 ~1.6 秒）
+验证 RPC 指令注册、会话物理隔离、Universal Summarizer 截断保底、状态机流转与账本锁迁移：
 
 ```powershell
 pnpm --dir node/packages/core test
 ```
 
-### 第 2 层：零成本沙箱与调度器自测 (耗时 < 2s，0 Token)
-在不消耗任何模型 Token 的前提下，验证所有靶场的 Grader 防作弊拦截，并通过本地 Fake Model 验证全流程调度与账本捕获：
+### 2. 零 Token 快速沙箱自测（耗时 < 2 秒，0 成本）
+在不启动真实 LLM 的前提下，验证各靶场判分器（Grader）的防作弊逻辑，并通过本地伪模型（Fake Model）测试运行器调度闭环：
 
 ```powershell
 cd tools/validation
@@ -120,33 +97,25 @@ node selftest.mjs
 node runner-selftest.mjs
 ```
 
-### 第 3 层：真实模型真机基准打靶
-驱动本地推理模型（如 `llama-server` 搭载 35B 模型）在真实靶场上进行科学对照打靶：
+### 3. 真实模型基准打靶
+连接本地推理服务器（如 `llama-server` 127.0.0.1:8080）执行客观打靶验证：
 
 ```powershell
 cd tools/validation
 
-# 1. 验证原始代码缺陷存在 (耗费 0 Token)
+# 验证缺陷基线存在（花费 0 Token）
 node run.mjs --instance qwen-next-speed-cap --arm none
 
-# 2. 驱动 GVS 自主修复并评测
+# 启动 GVS 自主编排修复
 node run.mjs --instance qwen-next-speed-cap --arm gvs --provider local-llama --model local-models
 ```
 
-*实测战报*：在 `qwen-next-speed-cap` 靶场上达成 **8/8 项物理检查 100% 通过、1 步外科手术修复、0 failure、563k tokens（较初始版本节省 20.3%）**。
+*实测战报*：在 `qwen-next-speed-cap` 靶场上达成 **8/8 项物理检查 100% 通过、1 步外科手术修改、0 failures、563k tokens（较原型节省 20.3%）**。
 
 ---
 
-## 生产落地指导原则
+## 核心设计原则
 
-1. **门禁先行**：GVS 必须依赖客观的命令判定。请在 `.pi/gvs.json` 中的 `checks` 数组配置可靠的测试命令（如 `npm test`、`pytest` 等）。
-2. **预算配置**：在 27B–35B 开启长思维链推理时，单步 Token 消耗较大，建议保持单步 `maxWorkerTokens: 150000`、整轮 `maxSteps: 8`，以达到最优性价比。
-3. **交接即产物**：面对复杂未知难题，当触发 `maxRepeats` 防死循环熔断时，GVS 沉淀的 `handoff` 报告能精准输出崩溃点与修复建议，为人工介入提供详尽依据。
-
----
-
-## 致谢与引用
-
-- **GVS5H 论文**：[Zero-Shot Self-Orchestration with Ledger-Based Control Improves Coding in Language Models (arXiv:2608.26480)](https://arxiv.org/abs/2608.26480)
-- **原型开源库**：[srossitto79/pi-gvs5h](https://github.com/srossitto79/pi-gvs5h) 与 [slee-persis/GVS5H](https://github.com/slee-persis/GVS5H)
-- **宿主 Agent 框架**：[Pi Agent (@earendil-works/pi-coding-agent)](https://github.com/earendil-works/pi)
+1. **零特判，优先泛化**：禁止为特定题目或错误堆砌 `if` 特判，保持通用 Harness 契约。
+2. **门禁先行**：系统依赖 `.pi/gvs.json` 中的 `checks` 实行客观验证；测试全绿后交由独立只读 Reviewer 盲审。
+3. **截断挽救与交接**：单步超时触发 Universal Summarizer 挽救数据；反复无进展时触发 `maxRepeats` 熔断，生成详尽的 Hand-off 报告移交人工。
