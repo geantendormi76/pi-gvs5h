@@ -1,5 +1,5 @@
-export type Role = "plan" | "ideate" | "manage" | "work" | "review" | "finalize";
-export const roles: readonly Role[] = ["plan", "ideate", "manage", "work", "review", "finalize"];
+export const roles = ["plan", "ideate", "manage", "work", "review", "finalize"] as const;
+export type Role = (typeof roles)[number];
 export type Status = "running" | "completed" | "cancelled" | "failed" | "paused";
 export type TaskStatus = "pending" | "working" | "done" | "dropped";
 export interface Task { id: string; description: string; status: TaskStatus; attempts: number; result: string }
@@ -9,18 +9,15 @@ export interface Config {
   maxTokens: number;
   runTimeoutMs: number;
   checkTimeoutMs: number;
-  /** Per-assignment bounds. One worker is one bounded call, not an open-ended session. */
   maxWorkerTurns: number;
   maxWorkerTokens: number;
-  /** Consecutive reassignments of one task before the run stops for lack of progress. */
   maxRepeats: number;
-  /** Retries of a single role invocation after a transport or contract failure. */
   maxFailures: number;
-  /** Independent read-only review of the goal before completion is claimed. */
   review: boolean;
-  /** Sampling temperature per role; omitted roles send no temperature. */
   temperatures: Partial<Record<Role, number>>;
   checks: Check[];
+  /** Optional list of protected file paths/patterns immune to agent modification */
+  protectedPaths?: string[];
 }
 export interface CheckResult { name: string; passed: boolean; output: string; finishedAt: string }
 export interface Run {
@@ -32,11 +29,9 @@ export interface Run {
   plan: string;
   notes: string;
   tasks: Task[];
-  /** Next steps proposed by the last worker, awaiting the manager's curation. */
   proposals: string[];
   steps: number;
   tokens: number;
-  /** Usage attributed to each role, so the cost of the scaffold can be read off a run. */
   tokensByRole: Partial<Record<Role, number>>;
   revision: number;
   verifiedRevision: number | null;
@@ -55,7 +50,6 @@ export interface TaskUpdate { id: string; status: TaskStatus }
 export interface Report {
   summary: string;
   notes?: string;
-  /** Plan: the initial task list. Ideate and work: proposed next steps for the manager. */
   tasks?: string[];
   decision?: "work" | "done";
   taskId?: string;
@@ -63,14 +57,12 @@ export interface Report {
   newTasks?: string[];
   taskUpdates?: TaskUpdate[];
   verdict?: "pass" | "fail";
-  /** Set by the runtime when an assignment ended at its bound instead of reporting. */
   incomplete?: boolean;
 }
 export interface WorkerRequest {
   role: Role;
   run: Run;
   task?: Task;
-  /** Extra direction from the engine, such as a no-progress warning. */
   guidance?: string;
   signal: AbortSignal;
   onTokens: (tokens: number) => void;

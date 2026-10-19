@@ -1,5 +1,6 @@
 import { createRun, Ledger } from "./ledger.ts";
-import { runCheck } from "./verification.ts";
+import { runCheck, auditTampering } from "./verification.ts";
+import { exportTrajectory } from "./rsr.ts";
 import type { Config, Report, Role, Run, Task, TaskStatus, Worker } from "./types.ts";
 
 const taskStatuses = new Set<TaskStatus>(["pending", "done", "dropped"]);
@@ -54,7 +55,6 @@ export async function workflow(options: WorkflowOptions): Promise<Run> {
       if (!previous) throw new Error("No saved GVS run to resume");
       run = previous;
       if (run.status === "completed") return run;
-      // A crash may leave partial edits. Re-plan from actual files; never accept old verification.
       for (const task of run.tasks) if (task.status === "working") task.status = "pending";
       if (run.phase !== "plan" && run.phase !== "ideate") run.phase = "manage";
       run.verifiedRevision = null;
@@ -87,7 +87,6 @@ export async function workflow(options: WorkflowOptions): Promise<Run> {
         if (current.tokens >= config.maxTokens) controller.abort(new Error("Token budget reached"));
       };
       let report: Report | undefined;
-      // A transport error or a malformed report costs one attempt, not the whole run.
       for (let attempt = 0; report === undefined; attempt++) {
         try {
           report = validateReport(role, await worker({ role, run: structuredClone(current), task, guidance, signal, onProgress, onTokens }));
@@ -101,7 +100,6 @@ export async function workflow(options: WorkflowOptions): Promise<Run> {
       }
       current.lastSummary = report.summary;
       if (report.notes) current.notes = report.notes;
-      // Proposals are suggested next steps, curated into the task list by the next manager.
       if (role === "ideate" || role === "work") current.proposals = report.tasks ?? [];
       await save();
       options.onReport?.(role, report);
@@ -115,10 +113,27 @@ export async function workflow(options: WorkflowOptions): Promise<Run> {
       for (const description of report.newTasks ?? []) addTask(description);
       current.proposals = [];
     };
+
+    // 【Terminal-RSI SPR 双阶门禁验证】
     const verify = async () => {
       current.checks = [];
       current.verifiedRevision = null;
       await save();
+
+      // Tier-1: 防篡改审计 (Tampering & Scope Guard)
+      const audit = await auditTampering(cwd, config.protectedPaths);
+      if (!audit.clean) {
+        current.checks.push({
+          name: "tampering-guard",
+          passed: false,
+          output: `SPR-Gate Violation: Protected paths were modified: [${audit.violations.join(", ")}]. Revert these edits and solve the issue in application code.`,
+          finishedAt: new Date().toISOString(),
+        });
+        await save();
+        return;
+      }
+
+      // Tier-2: 真实配置命令执行 (Multi-Check Execution)
       for (const check of config.checks) {
         signal.throwIfAborted();
         onProgress(`verify: ${check.name}`);
@@ -129,6 +144,7 @@ export async function workflow(options: WorkflowOptions): Promise<Run> {
       if (current.checks.length && current.checks.every(c => c.passed)) current.verifiedRevision = current.revision;
       await save();
     };
+
     await save();
     if (current.phase === "plan") {
       const report = await invoke("plan");
@@ -152,16 +168,15 @@ export async function workflow(options: WorkflowOptions): Promise<Run> {
           current.reason = "Configure verification commands in .pi/gvs.json, then /gvs resume. Completion is not verified.";
           break;
         }
-        // Always rerun checks at completion, including after resume or outside edits.
         await verify();
         const verified = current.verifiedRevision === current.revision;
         if (verified && !config.review) {
           current.status = "completed";
           current.reason = decision.summary;
+          await exportTrajectory(cwd, current);
           break;
         }
         if (verified) {
-          // Checks constrain the repository, not the goal. A fresh reader judges the goal.
           const review = await invoke("review");
           current.reviewedRevision = current.revision;
           current.reviewVerdict = review.verdict!;
@@ -169,10 +184,10 @@ export async function workflow(options: WorkflowOptions): Promise<Run> {
           if (review.verdict === "pass") {
             current.status = "completed";
             current.reason = review.summary;
+            await exportTrajectory(cwd, current);
             break;
           }
         }
-        // Avoid an unbounded manager-only loop when it repeatedly ignores failing evidence.
         if (current.steps >= config.maxSteps) {
           current.status = "paused";
           current.reason = verified ? "Worker step limit reached with unmet review findings" : "Worker step limit reached with failing verification";
@@ -193,7 +208,7 @@ export async function workflow(options: WorkflowOptions): Promise<Run> {
       current.lastTaskId = task.id;
       if (current.repeats >= config.maxRepeats) {
         current.status = "paused";
-        current.reason = `No progress: ${task.id} was reassigned ${current.repeats + 1} times without resolving it`;
+        current.reason = `No progress: ${task.id} was was reassigned ${current.repeats + 1} times without resolving it`;
         break;
       }
       task.status = "working";
@@ -206,14 +221,12 @@ export async function workflow(options: WorkflowOptions): Promise<Run> {
       const report = await invoke("work", task, current.repeats
         ? "The previous attempt at this exact task did not resolve it. Take a materially different approach instead of refining the last one."
         : undefined);
-      // Only the manager marks a task done; a worker returning is not evidence of success.
       task.status = "pending";
       task.result = report.summary;
       current.phase = "manage";
       await save();
       if (config.checks.length) await verify();
     }
-    // A run that stops without a verified completion still owes an account of the working tree.
     if (current.status === "paused" && !signal.aborted) {
       try { current.handoff = (await invoke("finalize")).summary; }
       catch (error) {

@@ -6,6 +6,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { validateReport } from "./workflow.ts";
+import { dehydrateObservation } from "./observation.ts";
 import type { Config, Report, Role, Worker } from "./types.ts";
 
 const instructions: Record<Role, string> = {
@@ -61,10 +62,10 @@ export function createPiWorker(options: PiWorkerOptions): Worker {
     } catch {}
   };
   const { maxWorkerTurns, maxWorkerTokens, temperatures } = options.config;
-  // Providers reject or ignore temperature alongside extended thinking; send it only where it lands.
   const reasoning = options.model.reasoning && (options.thinkingLevel ?? "medium") !== "off";
   const accepted = (options.model as { compat?: { supportsTemperature?: boolean } }).compat?.supportsTemperature !== false;
-      const summarizeIdeate = async (assignment: string, transcript: string, signal: AbortSignal, onTokens: (n: number) => void): Promise<{ summary: string; notes: string; tasks?: string[] } | undefined> => {
+
+  const summarizeIdeate = async (assignment: string, transcript: string, signal: AbortSignal, onTokens: (n: number) => void): Promise<{ summary: string; notes: string; tasks?: string[] } | undefined> => {
     if (!transcript.trim()) return undefined;
     const clipped = transcript.length <= 9000 ? transcript
       : `${transcript.slice(0, 3500)}\n...[middle omitted]...\n${transcript.slice(-5500)}`;
@@ -136,6 +137,7 @@ export function createPiWorker(options: PiWorkerOptions): Worker {
       return "the partial attempt could not be summarized";
     }
   };
+
   return async (request) => {
     request.signal.throwIfAborted();
     let report: Report | undefined;
@@ -165,18 +167,47 @@ export function createPiWorker(options: PiWorkerOptions): Worker {
         ? ["read", "grep", "find", "ls", "edit", "write", process.platform === "win32" ? "powershell" : "bash", "gvs_report"]
         : ["read", "grep", "find", "ls", "gvs_report"],
     });
-    // Sequential tools guarantee reporting cannot race a still-running edit.
+
     session.agent.toolExecution = "sequential";
     const temperature = reasoning || !accepted ? undefined : temperatures[request.role];
     if (temperature !== undefined) {
       const stream = session.agent.streamFunction;
       session.agent.streamFunction = (model, context, streamOptions) => stream(model, context, { ...streamOptions, temperature });
     }
+
     const before = session.agent.beforeToolCall;
     session.agent.beforeToolCall = async (call) => {
       if (report) return { block: true, reason: "Assignment already reported", terminate: true };
       return before?.(call);
     };
+
+    // 【Terminal-RSI 核心映射】TBOD 轮次边界观测脱水中间件
+    session.agent.afterToolCall = async (context, _signal) => {
+      if (report) return undefined;
+      const toolName = context.toolCall.name;
+      if (!context.result?.content || !Array.isArray(context.result.content)) {
+        return undefined;
+      }
+      let modified = false;
+      const newContent = context.result.content.map(block => {
+        if (block.type === "text" && typeof (block as any).text === "string") {
+          const raw = (block as any).text as string;
+          const dehydrated = dehydrateObservation(toolName, raw);
+          if (dehydrated !== raw) {
+            modified = true;
+            return { ...block, text: dehydrated };
+          }
+        }
+        return block;
+      });
+
+      if (modified) {
+        debugLog(`  [TBOD DEHYDRATED] Tool '${toolName}' output folded to save tokens`);
+        return { content: newContent };
+      }
+      return undefined;
+    };
+
     let turns = 0;
     let spent = 0;
     let warned = false;
@@ -185,7 +216,6 @@ export function createPiWorker(options: PiWorkerOptions): Worker {
       if (report) return true;
       turns++;
       if (turns >= maxWorkerTurns || spent >= maxWorkerTokens) { exhausted = true; return true; }
-      // Warn before the bound so the work reaches disk and the ledger instead of being cut off.
       if (!warned && (turns >= maxWorkerTurns * 0.75 || spent >= maxWorkerTokens * 0.75)) {
         warned = true;
         const warning = editing.includes(request.role)
@@ -198,6 +228,7 @@ export function createPiWorker(options: PiWorkerOptions): Worker {
       }
       return false;
     };
+
     let failure: string | undefined;
     let transcript = "";
     debugLog(`\n>>> WORKER START [Role: ${request.role}] Target: ${request.run.goal.slice(0, 80)}...`);
@@ -225,6 +256,7 @@ export function createPiWorker(options: PiWorkerOptions): Worker {
         if (texts.trim()) debugLog(`    【TEXT PREVIEW】: ${texts.trim().replace(/\s+/g, ' ').slice(0, 200)}...`);
       }
     });
+
     const abort = () => { void session.abort(); };
     request.signal.addEventListener("abort", abort, { once: true });
     try {
@@ -239,8 +271,8 @@ export function createPiWorker(options: PiWorkerOptions): Worker {
       const trouble = failure ?? (exhausted
         ? `stopped at its call bound after ${turns} turns and ${spent} tokens`
         : "ended without calling gvs_report");
-      // Only an editing worker leaves usable state behind; the other roles produce nothing to salvage.
-            if (request.role === "manage") {
+
+      if (request.role === "manage") {
         const pending = request.run.tasks.find(t => t.status === "pending");
         if (pending) {
           request.onProgress(`manage: auto-advancing to task ${pending.id} after call bound`);
@@ -252,7 +284,7 @@ export function createPiWorker(options: PiWorkerOptions): Worker {
           };
         }
       }
-            if (request.role === "ideate") {
+      if (request.role === "ideate") {
         const assignment = request.run.goal;
         const salvaged = await summarizeIdeate(assignment, transcript, request.signal, request.onTokens);
         if (salvaged) {
@@ -270,7 +302,6 @@ export function createPiWorker(options: PiWorkerOptions): Worker {
           return salvaged;
         }
       }
-      // Only an editing worker leaves usable state behind; the other roles produce nothing to salvage.
       if (!editing.includes(request.role)) throw new Error(`${request.role} ${trouble}; /gvs resume can retry`);
       const assignment = request.task?.description ?? request.run.goal;
       const digest = await summarize(request.role, assignment, transcript, request.signal, request.onTokens);
